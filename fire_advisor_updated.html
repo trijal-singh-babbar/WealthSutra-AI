@@ -1,4 +1,25 @@
 <!DOCTYPE html>
+<!--
+  fire_advisor_updated.html
+  ==========================
+  WealthSutra AI — Single-Page Frontend
+
+  This file is the complete client-side application for WealthSutra AI.
+  It is served by the FastAPI backend (app.py) at the root "/" route.
+
+  Structure:
+    <head>  — External CDN scripts (Chart.js), Google Fonts, and all CSS styles.
+    <body>  — Sticky navigation bar + four page sections:
+                1. #page-profile  : Profile input form
+                2. #page-score    : Financial health score cards
+                3. #page-fire     : FIRE corpus projection
+                4. #page-chat     : AI chat interface
+    <script>— All JavaScript logic:
+                • Scoring functions (emergencyScore, debtScore, …)
+                • API calls to the FastAPI backend (/analyze, /chat)
+                • UI rendering helpers (fmt, fmtNum, updateScoreUI, …)
+                • Chat initialization and message handling
+-->
 <html lang="en">
 <head>
 <script src="https://cdn.jsdelivr.net/npm/chart.js">
@@ -356,25 +377,48 @@ function analyzeProfileOld(profileInput) {
 
 <script>
 // ── STATE ──────────────────────────────────────────────
+// Global object that stores the user's current financial profile after analysis.
 let profile = {};
+// Array that tracks the conversation history for the AI chat feature.
 let chatHistory = [];
 
 // ── NAVIGATION ─────────────────────────────────────────
+/**
+ * Switch the visible page section and highlight the corresponding nav tab.
+ * @param {string} id - The page identifier suffix (e.g. "score", "fire", "chat").
+ */
 function showPage(id) {
+  // Hide all pages, then activate only the requested one
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  // Remove active styling from all nav tabs, then highlight the clicked one
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('page-' + id).classList.add('active');
   event.currentTarget.classList.add('active');
 }
 
 // ── SCORE LOGIC ────────────────────────────────────────
+/**
+ * Calculate the emergency-fund pillar score.
+ * A healthy emergency fund should cover at least 6 months of expenses.
+ * @param {number} savings - Total liquid savings (₹).
+ * @param {number} expense - Monthly expenses (₹).
+ * @returns {{ s: number, msg: string }} Score (0-100) and a human-readable message.
+ */
 function emergencyScore(savings, expense) {
+  // Months of expenses covered by current savings
   const m = savings / Math.max(expense, 1);
   if (m >= 6) return { s: 100, msg: `You have ${m.toFixed(1)} months covered. Excellent!` };
   if (m >= 3) return { s: 70, msg: `${m.toFixed(1)} months covered. Aim for 6 months.` };
   return { s: 40, msg: `Only ${m.toFixed(1)} months covered. Build your emergency fund first.` };
 }
 
+/**
+ * Calculate the debt-health pillar score based on the EMI-to-income ratio.
+ * A ratio above 30% is considered high-risk.
+ * @param {number} emi    - Monthly EMI obligation (₹).
+ * @param {number} income - Monthly gross income (₹).
+ * @returns {{ s: number, msg: string }} Score (0-100) and a human-readable message.
+ */
 function debtScore(emi, income) {
   const ratio = emi / Math.max(income, 1);
   if (ratio === 0) return { s: 100, msg: 'Debt-free! Great financial health.' };
@@ -383,6 +427,13 @@ function debtScore(emi, income) {
   return { s: 30, msg: `EMI is ${(ratio*100).toFixed(0)}% of income. Critical — reduce debt urgently.` };
 }
 
+/**
+ * Calculate the savings-rate pillar score.
+ * Saving ≥20% of income monthly is the recommended target.
+ * @param {number} investments - Monthly investment / SIP amount (₹).
+ * @param {number} income      - Monthly gross income (₹).
+ * @returns {{ s: number, msg: string }} Score (0-100) and a human-readable message.
+ */
 function savingsScore(investments, income) {
   const rate = investments / Math.max(income, 1);
   if (rate >= 0.3) return { s: 100, msg: `Saving ${(rate*100).toFixed(0)}% of income. Superstar saver!` };
@@ -391,33 +442,72 @@ function savingsScore(investments, income) {
   return { s: 30, msg: `Saving only ${(rate*100).toFixed(0)}% of income. Start a SIP today.` };
 }
 
+/**
+ * Calculate the insurance pillar score based on coverage type.
+ * Full marks are only awarded when both term life and health insurance are held.
+ * @param {string} type - Coverage type: "none" | "health" | "term" | "both".
+ * @returns {{ s: number, msg: string }} Score (0-100) and a human-readable message.
+ */
 function insuranceScore(type) {
+  // Lookup table mapping coverage type to score + advice message
   const map = { none: { s:10, msg:'No insurance is a serious risk. Get term + health cover ASAP.' }, health: { s:50, msg:'Health cover is good. Add a term plan to protect your family.' }, term: { s:60, msg:'Term plan is good. Add health insurance to cover medical costs.' }, both: { s:100, msg:'Complete coverage with term + health. Well protected!' } };
   return map[type] || map.none;
 }
 
+/**
+ * Calculate the investment-habit pillar score.
+ * A higher risk appetite raises the score ceiling, rewarding diversified investing.
+ * @param {number} investments - Monthly investment / SIP amount (₹).
+ * @param {number} income      - Monthly gross income (₹).
+ * @param {string} risk        - Risk appetite: "conservative" | "moderate" | "aggressive".
+ * @returns {{ s: number, msg: string }} Score (0-100) and a human-readable message.
+ */
 function investmentScore(investments, income, risk) {
   const rate = investments / Math.max(income, 1);
+  // Base score derived from the investment rate threshold
   let base = rate >= 0.15 ? 80 : rate >= 0.1 ? 60 : 40;
+  // Boost the score for users willing to take higher risk
   if (risk === 'moderate') base = Math.min(base + 10, 100);
   if (risk === 'aggressive') base = Math.min(base + 20, 100);
   return { s: base, msg: rate >= 0.15 ? 'Good investment habit. Consider diversifying into equity + debt.' : `Invest more: aim for at least ₹${Math.round(0.15*income/1000)*1000}/month.` };
 }
 
+/**
+ * Calculate the retirement-readiness pillar score.
+ * Score combines years remaining until retirement with the current investment rate.
+ * Weighted formula: time horizon contributes 50% and investment rate 150%.
+ * @param {number} age         - User's current age (years).
+ * @param {number} retireAge   - Target retirement age (years).
+ * @param {number} investments - Monthly investment / SIP amount (₹).
+ * @param {number} income      - Monthly gross income (₹).
+ * @returns {{ s: number, msg: string }} Score (0-100) and a human-readable message.
+ */
 function retirementScore(age, retireAge, investments, income) {
-  const years = retireAge - age;
+  const years = retireAge - age;  // Investment horizon
   if (years <= 0) return { s: 50, msg: 'Already at retirement age.' };
   const rate = investments / Math.max(income, 1);
+  // Weighted formula: time horizon contributes 50 % and investment rate 150 %
   const score = Math.min(100, Math.round((years / 30) * 50 + rate * 150));
   return { s: score, msg: score > 70 ? 'Great retirement trajectory!' : `Start investing more aggressively to hit your FIRE goal by ${retireAge}.` };
 }
 
+/**
+ * Return the CSS colour variable appropriate for a given score.
+ * Green (80+), amber (55+), or red (below 55).
+ * @param {number} s - Score value (0-100).
+ * @returns {string} CSS custom property string.
+ */
 function getColor(s) {
   if (s >= 80) return 'var(--accent2)';
   if (s >= 55) return 'var(--accent)';
   return 'var(--danger)';
 }
 
+/**
+ * Return a badge label and CSS class for the overall financial health score.
+ * @param {number} total - Overall score (0-100).
+ * @returns {[string, string]} Tuple of [label, cssClass].
+ */
 function getBadge(total) {
   if (total >= 80) return ['Excellent', 'tag-green'];
   if (total >= 60) return ['Good', 'tag-amber'];
@@ -426,7 +516,13 @@ function getBadge(total) {
 }
 
 // ── ANALYSE ────────────────────────────────────────────
+/**
+ * Read the profile form, POST it to the backend /analyze endpoint, and
+ * update the Score, FIRE, and Suggestions sections with the response.
+ * Called when the user clicks the "Analyze" button.
+ */
 async function analyzeProfile() {
+  // Collect all form field values into a profile object
   const profileData = {
     age: +document.getElementById('age').value,
     income: +document.getElementById('income').value,
@@ -443,6 +539,7 @@ async function analyzeProfile() {
   console.log("Sending:", profileData);
 
   try {
+    // Send profile data to the FastAPI backend for processing
     const res = await fetch("http://localhost:8000/analyze", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -452,7 +549,7 @@ async function analyzeProfile() {
     const data = await res.json();
     console.log("Backend:", data);
 
-    // 🔥 UPDATE UI
+    // Update the three UI sections with the backend's response
     updateScoreUI(data.score);
     updateFIREUI(data.fire);
     renderSuggestions(data.suggestions);
@@ -462,12 +559,23 @@ async function analyzeProfile() {
     alert("Backend not connected");
   }
 }
-// SCORE UI 
+
+// ── SCORE UI ───────────────────────────────────────────
+/**
+ * Render the overall financial health score in the hero element.
+ * @param {{ total: number, breakdown: object }} scoreData - Score data from the backend.
+ */
 function updateScoreUI(scoreData) {
   document.getElementById('scoreHero').innerHTML =
     `<h2>Money Health Score: ${scoreData.total}/100</h2>`;
 }
+
 // ── FIRE ────────────────────────────────────────────────
+/**
+ * Render the FIRE (Financial Independence, Retire Early) projection result.
+ * Displays years to retirement and projected corpus amount.
+ * @param {{ years: number, corpus: number }} fireData - FIRE data from the backend.
+ */
 function updateFIRE(fireData) {
   document.getElementById('fireResult').innerHTML = `
     <h3>FIRE Result</h3>
@@ -476,18 +584,29 @@ function updateFIRE(fireData) {
   `;
 }
 
+/**
+ * Format a rupee amount into a compact Indian notation (Crores / Lakhs).
+ * @param {number} n - Amount in rupees.
+ * @returns {string} Formatted string, e.g. "₹1.25 Cr" or "₹5.00 L".
+ */
 function fmt(n) {
-  if (n >= 1e7) return '₹' + (n/1e7).toFixed(2) + ' Cr';
-  if (n >= 1e5) return '₹' + (n/1e5).toFixed(2) + ' L';
+  if (n >= 1e7) return '₹' + (n/1e7).toFixed(2) + ' Cr';  // Crores
+  if (n >= 1e5) return '₹' + (n/1e5).toFixed(2) + ' L';   // Lakhs
   return '₹' + Math.round(n).toLocaleString('en-IN');
 }
+
+/**
+ * Format a number using the Indian locale (e.g. 1,00,000).
+ * @param {number} n - Number to format.
+ * @returns {string} Locale-formatted string.
+ */
 function fmtNum(n) { return Math.round(n).toLocaleString('en-IN'); }
 
-
-
-
+// Confirm the JavaScript bundle has loaded successfully
 console.log("JS LOADED");
+
 // ── CHAT ───────────────────────────────────────────────
+// Predefined quick-question chips shown at the start of a chat session.
 const SUGGESTIONS = [
   'Should I invest in SIP or FD?',
   'How to reduce my tax?',
@@ -496,8 +615,15 @@ const SUGGESTIONS = [
   'Best mutual funds for 2025?',
 ];
 
+/**
+ * Initialize the AI chat panel with a greeting and quick-question chips.
+ * Should be called after a successful profile analysis so the AI can
+ * reference the user's financial data.
+ */
 function initChat() {
+  // Reset chat history when a new session starts
   chatHistory = [];
+  // Render the bot greeting message using the current profile data
   document.getElementById('chatMessages').innerHTML = `
     <div class="msg bot">
       <div class="msg-avatar">🤖</div>
@@ -507,26 +633,37 @@ function initChat() {
       </div>
     </div>
   `;
+  // Render suggestion chips for quick question shortcuts
   document.getElementById('chipRow').innerHTML = SUGGESTIONS.map(s =>
     `<div class="chip" onclick="sendChip('${s}')">${s}</div>`
   ).join('');
 }
 
+/**
+ * Populate the chat input with a suggestion chip text and immediately send it.
+ * @param {string} text - The suggestion text to pre-fill and submit.
+ */
 function sendChip(text) {
   document.getElementById('chatInput').value = text;
   sendMsg();
 }
 
+/**
+ * Send the current chat input to the backend /chat endpoint and display
+ * the AI's reply in the messages panel.
+ * Triggered by the Send button or pressing Enter in the input field.
+ */
 async function sendMsg() {
   const text = document.getElementById("chatInput").value;
 
   try {
+    // POST the message and current profile context to the backend
     const res = await fetch("http://localhost:8000/chat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         message: text,
-        profile: {}   // optional
+        profile: {}   // optional: pass current profile for context-aware replies
       })
     });
 
@@ -541,10 +678,16 @@ async function sendMsg() {
 }
 
 // ── INIT FIRE SLIDERS ──────────────────────────────────
+// Clear the post-retirement expense field on page load to avoid stale values
 document.getElementById('postExpense').value = '';
 
 
 // ── WRAPPER (ADDED) ───────────────────────────────────
+/**
+ * Bridge function: updates the score hero from backend data then delegates to
+ * the original client-side UI rendering logic (analyzeProfileOld).
+ * @param {{ score?: { total: number } }} data - Response data from /analyze.
+ */
 function renderUI(data) {
   if (data && data.score) {
     const total = data.score.total;
@@ -555,7 +698,15 @@ function renderUI(data) {
 }
 
 // ── ORIGINAL UI LOGIC WRAPPED ─────────────────────────
+/**
+ * Run the full client-side analysis using a supplied profile object.
+ * Computes all six pillar scores locally, renders the score cards, and
+ * navigates to the score page. Also triggers the FIRE projection update.
+ * @param {{ age, income, expenses, savings, investments, debt, emi,
+ *           insurance, risk, retireAge }} profileInput - User's financial profile.
+ */
 function analyzeProfileOld(profileInput) {
+  // Destructure the profile for convenience
   const age = profileInput.age;
   const income = profileInput.income;
   const expenses = profileInput.expenses;
@@ -567,8 +718,10 @@ function analyzeProfileOld(profileInput) {
   const risk = profileInput.risk;
   const retireAge = profileInput.retireAge;
 
+  // Save to global state so other functions (e.g. chat) can access it
   profile = profileInput;
 
+  // Build the category array by running each pillar scoring function
   const cats = [
     { name: 'Emergency Fund', icon: '🛡️', ...emergencyScore(savings, expenses) },
     { name: 'Debt Health', icon: '💳', ...debtScore(emi, income) },
@@ -578,10 +731,12 @@ function analyzeProfileOld(profileInput) {
     { name: 'Retirement', icon: '🎯', ...retirementScore(age, retireAge, investments, income) },
   ];
 
+  // Overall score is the integer average of all six pillar scores
   const total = Math.round(cats.reduce((a, c) => a + c.s, 0) / cats.length);
 
   document.getElementById('scoreHero').innerHTML = `<h2>Money Health Score: ${total}/100</h2>`;
 
+  // Render individual category cards with a progress bar and advice message
   document.getElementById('catsGrid').innerHTML = cats.map(c => `
     <div class="cat-card">
       <div class="cat-top">
@@ -593,10 +748,13 @@ function analyzeProfileOld(profileInput) {
     </div>
   `).join('');
 
+  // Placeholder heading for the suggestions section (AI fills this via /analyze)
   document.getElementById('suggestionsBox').innerHTML = `<h3>🎯 Suggestions</h3>`;
 
+  // Refresh the FIRE projection panel
   updateFIRE();
 
+  // Navigate to the score results page
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById('page-score').classList.add('active');
 }
